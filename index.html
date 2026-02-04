@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CPSC 404 — Question Picker</title>
+    <link rel="stylesheet" href="picker.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="picker.js"></script>
+</head>
+<body>
+    <h1>CPSC 404 — Discussion Question Picker</h1>
+    <button id="themeBtn" title="Toggle light/dark mode">🌙</button>
+
+    <div class="controls">
+        <select id="weekSelect" disabled>
+            <option value="">Loading weeks…</option>
+        </select>
+        <div class="nav-row">
+            <button id="backBtn" disabled>← Back</button>
+            <button id="pickBtn" disabled>Pick a Question</button>
+            <button id="forwardBtn" disabled>Forward →</button>
+            <button id="resetBtn" disabled>Reset Pool</button>
+        </div>
+        <span class="status" id="status"></span>
+        <div class="keyboard-hint">Space / → = next &nbsp;·&nbsp; ← = back &nbsp;·&nbsp; R = reset</div>
+    </div>
+
+    <div class="question-card" id="card">
+        <div class="placeholder">Select a week to begin</div>
+    </div>
+
+    <script>
+        const weekSelect = document.getElementById('weekSelect');
+        const backBtn = document.getElementById('backBtn');
+        const pickBtn = document.getElementById('pickBtn');
+        const forwardBtn = document.getElementById('forwardBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const card = document.getElementById('card');
+        const status = document.getElementById('status');
+
+        let pool = null;
+
+        async function loadWeeks() {
+            try {
+                const res = await fetch(REPO_CONFIG.apiBase);
+                const items = await res.json();
+                const weeks = items
+                    .filter(item => item.type === 'dir' && item.name.startsWith('week'))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+
+                weekSelect.innerHTML = '<option value="">— Choose a week —</option>';
+                for (const w of weeks) {
+                    const opt = document.createElement('option');
+                    opt.value = w.name;
+                    opt.textContent = weekLabel(w.name);
+                    weekSelect.appendChild(opt);
+                }
+                weekSelect.disabled = false;
+            } catch (err) {
+                card.innerHTML = `<div class="placeholder">Error loading weeks: ${err.message}</div>`;
+            }
+        }
+
+        async function loadQuestions(weekDir) {
+            pickBtn.disabled = true;
+            resetBtn.disabled = true;
+            card.innerHTML = '<div class="placeholder">Loading questions…</div>';
+            status.textContent = '';
+
+            try {
+                const res = await fetch(`${REPO_CONFIG.apiBase}/${weekDir}/questions`);
+                const files = await res.json();
+                const mdFiles = files.filter(isQuestionFile);
+
+                const fetched = await Promise.all(
+                    mdFiles.map(async (f) => {
+                        const r = await fetch(f.download_url);
+                        const text = await r.text();
+                        return {
+                            author: extractAuthor(f.name, text),
+                            body: text
+                        };
+                    })
+                );
+
+                pool = createPool(fetched.filter(isNonEmpty));
+                updateStatus();
+                pickBtn.disabled = false;
+                resetBtn.disabled = false;
+                card.innerHTML = '<div class="placeholder">Ready — click "Pick a Question" or press Space</div>';
+            } catch (err) {
+                card.innerHTML = `<div class="placeholder">Error loading questions: ${err.message}</div>`;
+            }
+        }
+
+        function updateStatus() {
+            if (!pool) { status.textContent = ''; return; }
+            status.textContent = `${pool.remaining} of ${pool.total} remaining`;
+            backBtn.disabled = !pool.canGoBack;
+            forwardBtn.disabled = !pool.canGoForward;
+        }
+
+        function checkScroll() {
+            const existing = card.querySelector('.scroll-hint');
+            if (existing) existing.remove();
+
+            if (card.scrollHeight > card.clientHeight + 10) {
+                const hint = document.createElement('div');
+                hint.className = 'scroll-hint';
+                hint.textContent = '↓ scroll for more ↓';
+                card.appendChild(hint);
+            }
+        }
+
+        function showQuestion(q) {
+            const rendered = marked.parse(cleanBody(q.body));
+            card.innerHTML = `
+                <div class="author">${q.author}</div>
+                <div class="content">${rendered}</div>
+            `;
+            card.scrollTop = 0;
+            requestAnimationFrame(checkScroll);
+        }
+
+        function pickRandom() {
+            if (!pool || pool.isEmpty) {
+                card.innerHTML = '<div class="done-message">All questions have been shown!<br>Click "Reset Pool" or press R to start over.</div>';
+                pickBtn.disabled = true;
+                updateStatus();
+                return;
+            }
+
+            showQuestion(pool.pick());
+            updateStatus();
+
+            if (pool.isEmpty) {
+                pickBtn.disabled = true;
+            }
+        }
+
+        function goBack() {
+            if (!pool || !pool.canGoBack) return;
+            showQuestion(pool.back());
+            updateStatus();
+        }
+
+        function goForward() {
+            if (!pool || !pool.canGoForward) return;
+            showQuestion(pool.forward());
+            updateStatus();
+        }
+
+        function resetQuestionPool() {
+            if (pool) pool.reset();
+            updateStatus();
+            pickBtn.disabled = false;
+            card.innerHTML = '<div class="placeholder">Pool reset — click "Pick a Question" or press Space</div>';
+        }
+
+        // Event listeners
+        weekSelect.addEventListener('change', () => {
+            const week = weekSelect.value;
+            if (week) {
+                loadQuestions(week);
+            } else {
+                pool = null;
+                pickBtn.disabled = true;
+                resetBtn.disabled = true;
+                status.textContent = '';
+                card.innerHTML = '<div class="placeholder">Select a week to begin</div>';
+            }
+        });
+
+        backBtn.addEventListener('click', goBack);
+        pickBtn.addEventListener('click', pickRandom);
+        forwardBtn.addEventListener('click', goForward);
+        resetBtn.addEventListener('click', resetQuestionPool);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.target === weekSelect) return;
+
+            if (e.key === 'ArrowLeft' && !backBtn.disabled) {
+                e.preventDefault();
+                goBack();
+            } else if ((e.key === ' ' || e.key === 'ArrowRight') && !pickBtn.disabled) {
+                e.preventDefault();
+                pickRandom();
+            } else if ((e.key === 'r' || e.key === 'R') && !resetBtn.disabled) {
+                e.preventDefault();
+                resetQuestionPool();
+            }
+        });
+
+        // Swipe gestures on the question card
+        let touchStartX = null;
+        card.addEventListener('touchstart', (e) => {
+            touchStartX = e.touches[0].clientX;
+        }, { passive: true });
+        card.addEventListener('touchend', (e) => {
+            if (touchStartX === null) return;
+            const dx = e.changedTouches[0].clientX - touchStartX;
+            touchStartX = null;
+            if (Math.abs(dx) < 50) return; // ignore small swipes
+            if (dx > 0 && !backBtn.disabled) goBack();
+            else if (dx < 0 && !pickBtn.disabled) pickRandom();
+        }, { passive: true });
+
+        // Theme toggle
+        const themeBtn = document.getElementById('themeBtn');
+        function applyTheme(light) {
+            document.body.classList.toggle('light', light);
+            themeBtn.textContent = light ? '☀️' : '🌙';
+            themeBtn.title = light ? 'Switch to dark mode' : 'Switch to light mode';
+        }
+        // Load saved preference (default to dark)
+        applyTheme(localStorage.getItem('theme') === 'light');
+        themeBtn.addEventListener('click', () => {
+            const goLight = !document.body.classList.contains('light');
+            localStorage.setItem('theme', goLight ? 'light' : 'dark');
+            applyTheme(goLight);
+        });
+
+        loadWeeks();
+    </script>
+</body>
+</html>
